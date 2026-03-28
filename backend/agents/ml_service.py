@@ -29,7 +29,7 @@ if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not set in environment!")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-2.5-flash"
 
 app = FastAPI(title="Stock Whisperer — AI/ML Agent Layer", version="1.0.0")
 app.add_middleware(
