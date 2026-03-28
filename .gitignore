@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.next/
+
+# Secrets — NEVER commit these
+.env
+.env.local
+.env.production
+
+# OS
+.DS_Store
+Thumbs.db
