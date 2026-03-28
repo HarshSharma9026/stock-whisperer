@@ -15,6 +15,8 @@ from typing import Optional
 from functools import wraps
 from contextlib import asynccontextmanager
 
+import httpx
+
 import yfinance as yf
 import feedparser
 import requests
@@ -424,44 +426,136 @@ async def get_full_analysis(
     ticker: str = Query(...),
     lang: str = Query("en"),
 ):
-    """
-    Orchestrates: quote + chart + pattern + backtest + promoter + news
-    Returns a unified analysis object consumed by the frontend AnalysisCard.
-    """
     key = cache_key("analysis", ticker, lang)
     cached = cache_get(key)
     if cached:
         return cached
 
-    # Run independent fetches concurrently
-    quote_task = asyncio.create_task(_safe_get_quote(ticker))
-    promoter_task = asyncio.create_task(get_promoter_activity(ticker))
-    news_task = asyncio.create_task(get_news(ticker))
+    # Fetch chart data for pattern + confluence
+    yf_ticker = get_yf_ticker(ticker)
+    try:
+        df = yf.download(yf_ticker, period="3mo", interval="1d", progress=False)
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df = df.dropna()
+        df.index = df.index.astype(str)
 
-    quote, promoter, news = await asyncio.gather(quote_task, promoter_task, news_task)
+        candles = [
+            {
+                "time": str(idx)[:10],
+                "open": round(float(row["Open"]), 2),
+                "high": round(float(row["High"]), 2),
+                "low": round(float(row["Low"]), 2),
+                "close": round(float(row["Close"]), 2),
+                "volume": int(row["Volume"]),
+            }
+            for idx, row in df.iterrows()
+        ]
+    except Exception:
+        candles = []
 
-    # TODO: call AI/ML service for pattern + confluence + narrative
-    # For now, return assembled raw data — AI/ML fills in the rest
+    # Run all agents concurrently
+    ML_SERVICE = "http://localhost:8001"
+
+    async def call_ml(endpoint, payload):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(f"http://localhost:8001{endpoint}", json=payload)
+                if r.status_code != 200:
+                    print(f"[ML ERROR] {endpoint} returned {r.status_code}: {r.text[:200]}")
+                    return {}
+                return r.json()
+        except Exception as e:
+            print(f"[ML ERROR] {endpoint} failed: {str(e)}")
+            return {}
+
+    async def call_backend(endpoint):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(f"http://localhost:8000{endpoint}")
+                if r.status_code != 200:
+                    print(f"[BACKEND ERROR] {endpoint} returned {r.status_code}")
+                    return {}
+                return r.json()
+        except Exception as e:
+            print(f"[BACKEND ERROR] {endpoint} failed: {str(e)}")
+            return {}
+    # Run pattern detection, promoter, news concurrently
+    pattern_task = call_ml("/api/pattern", {"ticker": ticker, "candles": candles})
+    promoter_task = call_backend(f"/api/promoter?ticker={ticker}")
+    news_task = call_backend(f"/api/news?ticker={ticker}")
+
+    pattern_data, promoter_data, news_data = await asyncio.gather(
+        pattern_task, promoter_task, news_task
+    )
+
+    top_pattern = pattern_data.get("top_pattern")
+    promoter_action = promoter_data.get("action", "No recent activity")
+    promoter_delta = promoter_data.get("score_delta", 0)
+    headlines = news_data.get("headlines", [])
+
+    # Get news sentiment
+    sentiment_data = await call_ml("/api/sentiment", {
+        "ticker": ticker,
+        "headlines": headlines
+    })
+    news_sentiment = sentiment_data.get("sentiment", "Neutral")
+    news_summary = sentiment_data.get("summary", "")
+
+    # Get confluence score
+    confluence_data = await call_ml("/api/confluence", {
+        "ticker": ticker,
+        "candles": candles,
+        "pattern": top_pattern,
+        "news_sentiment": news_sentiment,
+        "promoter_score_delta": promoter_delta,
+    })
+    confluence_score = confluence_data.get("confluence_score", 0)
+    scores = confluence_data.get("scores", {})
+
+    # Get backtest stats
+    backtest = None
+    if top_pattern:
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{ML_SERVICE}/api/backtest/{top_pattern['type'].replace(' ', '%20')}"
+                )
+                backtest = r.json()
+        except Exception:
+            pass
+
+    # Generate narrative
+    narrative_data = await call_ml("/api/narrative", {
+        "ticker": ticker,
+        "pattern": top_pattern,
+        "backtest": backtest,
+        "confluence_score": confluence_score,
+        "scores": scores,
+        "news_sentiment": news_sentiment,
+        "news_summary": news_summary,
+        "promoter_action": promoter_action,
+        "language": lang,
+    })
+    narrative = narrative_data.get("narrative", "Analysis unavailable.")
+
     result = {
         "ticker": ticker,
         "language": lang,
-        "quote": quote,
-        "promoter_action": promoter.get("action", "Unknown"),
-        "promoter_score_delta": promoter.get("score_delta", 0),
-        "headlines": news.get("headlines", []),
-        # Placeholders — filled by AI/ML layer
-        "pattern": None,
-        "backtest": None,
-        "confluence_score": None,
-        "scores": None,
-        "news_sentiment": None,
-        "news_summary": None,
-        "narrative": None,
+        "pattern": top_pattern,
+        "backtest": backtest,
+        "confluence_score": confluence_score,
+        "label": confluence_data.get("label", ""),
+        "scores": scores,
+        "news_sentiment": news_sentiment,
+        "news_summary": news_summary,
+        "promoter_action": promoter_action,
+        "narrative": narrative,
+        "headlines": headlines,
     }
 
     cache_set(key, result, ttl_seconds=600)
     return result
-
 
 async def _safe_get_quote(ticker: str):
     try:
@@ -481,24 +575,20 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    """
-    Proxies conversational Q&A to the AI/ML Gemini chat agent.
-    Backend ensures API key never reaches the frontend.
-    """
-    # Import here to avoid circular dependency
-    from agents.narrative_agent import gemini_chat
-
     try:
-        reply = await gemini_chat(
-            ticker=req.ticker,
-            language=req.language,
-            message=req.message,
-            history=req.history,
-        )
-        return {"reply": reply}
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                "http://localhost:8001/api/gemini-chat",
+                json={
+                    "ticker": req.ticker,
+                    "language": req.language,
+                    "message": req.message,
+                    "history": req.history,
+                }
+            )
+            return r.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
-
 
 if __name__ == "__main__":
     import uvicorn
