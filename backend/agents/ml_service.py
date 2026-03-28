@@ -17,15 +17,18 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # ─── Gemini Setup ─────────────────────────────────────────
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=r"E:\Hackathons\ET Hackathon\Stock Whisperer\backend\.env")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not set in environment!")
 
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-2.0-flash"
 
 app = FastAPI(title="Stock Whisperer — AI/ML Agent Layer", version="1.0.0")
@@ -106,19 +109,17 @@ def detect_all_patterns(df: pd.DataFrame) -> list[dict]:
             if detection:
                 results.append({
                     "type": name,
-                    "confidence": detection["confidence"],
+                    "confidence": int(detection["confidence"]),
                     "direction": detection.get("direction", "bullish"),
-                    "start_idx": detection.get("start_idx"),
-                    "end_idx": detection.get("end_idx"),
+                    "start_idx": int(detection["start_idx"]) if detection.get("start_idx") is not None else None,
+                    "end_idx": int(detection["end_idx"]) if detection.get("end_idx") is not None else None,
                     "description": detection.get("description", ""),
                 })
         except Exception:
             continue
 
-    # Sort by confidence descending
     results.sort(key=lambda x: x["confidence"], reverse=True)
     return results
-
 
 def register_pattern(name: str):
     """Decorator to register a pattern detection function."""
@@ -132,13 +133,6 @@ def register_pattern(name: str):
 
 @register_pattern("Cup & Handle")
 def detect_cup_and_handle(df: pd.DataFrame) -> Optional[dict]:
-    """
-    Heuristic: Look for U-shaped price trough followed by small pullback.
-    Conditions:
-      1. Prices fall >10%, form a bottom, recover to near previous high
-      2. Small pullback (handle) of 3-7% after recovery
-      3. Volume on breakout > 1.5x avg
-    """
     if len(df) < 40:
         return None
 
@@ -147,94 +141,80 @@ def detect_cup_and_handle(df: pd.DataFrame) -> Optional[dict]:
     window = min(60, n)
     segment = closes[-window:]
 
-    # Find the trough (minimum)
     trough_idx = np.argmin(segment)
-    left_peak = np.max(segment[:trough_idx]) if trough_idx > 5 else 0
-    right_side = segment[trough_idx:]
+    if trough_idx < 5:
+        return None
+
+    left_peak = np.max(segment[:trough_idx])
     trough_val = segment[trough_idx]
-
-    # Cup depth check
-    if left_peak == 0 or (left_peak - trough_val) / left_peak < 0.10:
-        return None
-
-    # Recovery check — did price come back near left peak?
+    right_side = segment[trough_idx:]
     right_max = np.max(right_side)
-    if right_max < left_peak * 0.92:
+
+    # Cup depth must be > 10%
+    cup_depth = (left_peak - trough_val) / left_peak
+    if cup_depth < 0.10:
         return None
 
-    # Handle: small pullback in last 10 bars
-    handle_segment = segment[-10:]
-    handle_drop = (np.max(handle_segment) - np.min(handle_segment)) / np.max(handle_segment)
-    if not (0.02 <= handle_drop <= 0.07):
+    # Recovery — lowered from 92% to 40% to catch forming cups
+    recovery = (right_max - trough_val) / (left_peak - trough_val)
+    if recovery < 0.40:
         return None
 
-    confidence = 60
-    # Boost for volume confirmation
+    # Score based on how complete the recovery is
+    confidence = 40 + int(recovery * 25)  # 40 base, up to 65
+
     avg_vol = df["Volume"].mean()
     last_vol = df["Volume"].iloc[-1]
     if last_vol > avg_vol * 1.5:
         confidence += 15
 
     return {
-        "confidence": confidence,
+        "confidence": min(confidence, 80),
         "direction": "bullish",
         "start_idx": max(0, n - window),
         "end_idx": n - 1,
-        "description": f"Cup & Handle pattern detected. Price formed a U-shaped base and is near breakout.",
+        "description": f"Cup & Handle forming. {int(recovery*100)}% recovered from trough. Cup depth: {int(cup_depth*100)}%.",
     }
-
 
 # ── Double Bottom ─────────────────────────────────────────
 
 @register_pattern("Double Bottom")
 def detect_double_bottom(df: pd.DataFrame) -> Optional[dict]:
-    """
-    Two roughly equal lows separated by a moderate recovery (the 'neckline').
-    """
     if len(df) < 20:
         return None
 
     closes = df["Close"].values
-    window = min(40, len(closes))
+    n = len(closes)
+    window = min(60, n)
     segment = closes[-window:]
 
-    # Find two lowest local minima
-    from scipy.signal import argrelextrema
-    try:
-        local_mins = argrelextrema(segment, np.less, order=3)[0]
-    except ImportError:
-        # Fallback: simple 2-point detection
-        half = len(segment) // 2
-        min1_idx = np.argmin(segment[:half])
-        min2_idx = np.argmin(segment[half:]) + half
-        local_mins = [min1_idx, min2_idx]
+    # Always use simple half-split — more reliable than scipy on short series
+    half = len(segment) // 2
+    min1_idx = np.argmin(segment[:half])
+    min2_idx = np.argmin(segment[half:]) + half
+    low1, low2 = segment[min1_idx], segment[min2_idx]
 
-    if len(local_mins) < 2:
+    # Bottoms within 5% of each other (loosened from 3%)
+    if abs(low1 - low2) / min(low1, low2) > 0.05:
         return None
 
-    # Take last two minima
-    m1, m2 = local_mins[-2], local_mins[-1]
-    low1, low2 = segment[m1], segment[m2]
-
-    # Bottoms should be within 3% of each other
-    if abs(low1 - low2) / min(low1, low2) > 0.03:
+    # Recovery between the two lows must be at least 5%
+    mid_max = np.max(segment[min1_idx:min2_idx])
+    recovery_pct = (mid_max - min(low1, low2)) / min(low1, low2)
+    if recovery_pct < 0.05:
         return None
 
-    # Recovery between them should be at least 5%
-    mid_max = np.max(segment[m1:m2])
-    if (mid_max - min(low1, low2)) / min(low1, low2) < 0.05:
-        return None
-
-    confidence = 65
+    # Confidence based on how equal the two bottoms are
+    equality = 1 - (abs(low1 - low2) / min(low1, low2) / 0.05)
+    confidence = 55 + int(equality * 15)  # 55–70
 
     return {
         "confidence": confidence,
         "direction": "bullish",
-        "start_idx": len(closes) - window + m1,
-        "end_idx": len(closes) - 1,
-        "description": f"Double Bottom detected at ₹{low1:.0f} and ₹{low2:.0f}. Bullish reversal signal.",
+        "start_idx": n - window + min1_idx,
+        "end_idx": n - 1,
+        "description": f"Double Bottom at ₹{low1:.0f} and ₹{low2:.0f}. Difference: {abs(low1-low2)/min(low1,low2)*100:.1f}%. Bullish reversal signal.",
     }
-
 
 # ── Support/Resistance Breakout ───────────────────────────
 
@@ -328,22 +308,21 @@ def detect_head_and_shoulders(df: pd.DataFrame) -> Optional[dict]:
 
 @app.post("/api/pattern")
 async def detect_patterns(req: PatternRequest):
-    """
-    Detects chart patterns in the provided OHLCV data.
-    Returns patterns sorted by confidence, highest first.
-    """
     if len(req.candles) < 15:
-        raise HTTPException(status_code=400, detail="Need at least 15 candles for pattern detection")
+        raise HTTPException(status_code=400, detail="Need at least 15 candles")
 
-    df = candles_to_df(req.candles)
-    patterns = detect_all_patterns(df)
-
-    return {
-        "ticker": req.ticker,
-        "patterns": patterns,
-        "top_pattern": patterns[0] if patterns else None,
-    }
-
+    try:
+        df = candles_to_df(req.candles)
+        patterns = detect_all_patterns(df)
+        return {
+            "ticker": req.ticker,
+            "patterns": patterns,
+            "top_pattern": patterns[0] if patterns else None,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()  # prints full error to ML service terminal
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ─── Confluence Score Engine ──────────────────────────────
 
@@ -675,14 +654,10 @@ Never speculate on exact price targets without data.
 
 def _gemini_call(prompt: str, history: list = None) -> str:
     """Synchronous Gemini API call. Wrap in executor for async routes."""
-    model = genai.GenerativeModel(MODEL_NAME)
-
-    if history:
-        chat = model.start_chat(history=history)
-        response = chat.send_message(prompt)
-    else:
-        response = model.generate_content(prompt)
-
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=prompt,
+    )
     return response.text
 
 
