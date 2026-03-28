@@ -35,3 +35,15 @@ response = requests.post(
 data = response.json()
 print("Narrative:")
 print(data["narrative"])
+
+# Test Hindi
+payload["language"] = "hi"
+response = requests.post("http://localhost:8001/api/narrative", json=payload)
+print("\nHindi Narrative:")
+print(response.json()["narrative"])
+
+# Test Hinglish
+payload["language"] = "hinglish"
+response = requests.post("http://localhost:8001/api/narrative", json=payload)
+print("\nHinglish Narrative:")
+print(response.json()["narrative"])
