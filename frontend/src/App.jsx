@@ -7,6 +7,8 @@
 import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TickerSearch, StockInfoCard, CandlestickChart, AnalysisCard, Watchlist, SEBIDisclaimer, useStockData } from "./components/index";
+import { ImpactModel } from "./components/ImpactModel";
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 5 * 60 * 1000, retry: 2 },
@@ -93,6 +95,8 @@ function StockApp() {
 
         {/* Watchlist — Phase 4 */}
         <Watchlist onSelect={setTicker} activeTicker={ticker} />
+        {/* Impact Model — Phase 4 */}
+        <ImpactModel />
       </main>
 
       <SEBIDisclaimer language={language} />
