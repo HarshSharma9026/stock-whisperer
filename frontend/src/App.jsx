@@ -95,14 +95,14 @@ function StockApp() {
           padding: 8px 12px;
           font-size: 11px;
           color: #9ca3af;
-          white-space: nowrap;
-          max-width: 220px;
+          white-space: normal;
+          width: 220px;
           text-align: center;
           line-height: 1.4;
           pointer-events: none;
           opacity: 0;
           transition: opacity 0.15s ease;
-          z-index: 100;
+          z-index: 9999;
         }
         .tooltip-container:hover .tooltip-box { opacity: 1; }
         .tooltip-box::after {

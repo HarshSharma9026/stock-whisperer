@@ -215,19 +215,34 @@ async def get_chart(
             df.columns = df.columns.get_level_values(0)
 
         df = df.dropna()
-        df.index = df.index.astype(str)  # Convert timestamps to strings
+        df = df.sort_index()
 
-        candles = [
-            {
-                "time": str(idx)[:10],
+        # For intraday intervals keep full timestamp, for daily use date only
+        is_intraday = interval in ["1m", "5m", "15m", "30m", "60m", "90m", "1h"]
+
+        seen_times = set()
+        candles = []
+        for idx, row in df.iterrows():
+            if is_intraday:
+                # Convert to Unix timestamp for Lightweight Charts intraday
+                if hasattr(idx, 'timestamp'):
+                    time_val = int(idx.timestamp())
+                else:
+                    time_val = int(pd.Timestamp(idx).timestamp())
+            else:
+                time_val = str(idx)[:10]
+
+            if time_val in seen_times:
+                continue
+            seen_times.add(time_val)
+            candles.append({
+                "time": time_val,
                 "open": round(float(row["Open"]), 2),
                 "high": round(float(row["High"]), 2),
                 "low": round(float(row["Low"]), 2),
                 "close": round(float(row["Close"]), 2),
                 "volume": int(row["Volume"]),
-            }
-            for idx, row in df.iterrows()
-        ]
+            })
 
         result = {"ticker": ticker, "period": period, "interval": interval, "candles": candles}
         cache_set(key, result, ttl_seconds=900)
@@ -525,10 +540,10 @@ async def get_full_analysis(
         except Exception:
             pass
 
-    # Generate narrative
+    # Generate narrative — always run even if no pattern detected
     narrative_data = await call_ml("/api/narrative", {
         "ticker": ticker,
-        "pattern": top_pattern,
+        "pattern": top_pattern,  # can be None — narrative handles this
         "backtest": backtest,
         "confluence_score": confluence_score,
         "scores": scores,
@@ -537,8 +552,12 @@ async def get_full_analysis(
         "promoter_action": promoter_action,
         "language": lang,
     })
-    narrative = narrative_data.get("narrative", "Analysis unavailable.")
+    narrative = narrative_data.get("narrative", "")
 
+    # Fallback if narrative is empty
+    if not narrative:
+        direction = "bullish" if confluence_score >= 50 else "bearish"
+        narrative = f"{ticker} shows a {confluence_score}/100 confluence score indicating a {'moderate' if confluence_score >= 41 else 'weak'} setup. RSI and MACD signals suggest {direction} momentum. No clear chart pattern detected — monitor for breakout signals."
     result = {
         "ticker": ticker,
         "language": lang,
@@ -571,6 +590,7 @@ class ChatRequest(BaseModel):
     language: str = "en"
     message: str
     history: list[dict] = []
+    context: Optional[dict] = None
 
 
 @app.post("/api/chat")
@@ -584,6 +604,7 @@ async def chat(req: ChatRequest):
                     "language": req.language,
                     "message": req.message,
                     "history": req.history,
+                    "context": req.context,
                 }
             )
             return r.json()

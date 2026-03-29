@@ -274,7 +274,7 @@ export function AnalysisCard({ ticker, language }) {
     setChatMessages(prev => [...prev, { role: "user", content: message }]);
     setChatLoading(true);
     try {
-      const res = await api.post("/api/chat", { ticker, language, message, history: chatMessages });
+      const res = await api.post("/api/chat", { ticker, language, message, history: chatMessages, context: data ?? null });
       setChatMessages(prev => [...prev, { role: "assistant", content: res.data.reply }]);
     } catch {
       setChatMessages(prev => [...prev, { role: "assistant", content: "Sorry, couldn't get a response. Try again." }]);
