@@ -6,6 +6,7 @@
 # Run: uvicorn main:app --reload
 # ============================================================
 
+import os
 import json
 import time
 import hashlib
@@ -80,10 +81,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origin = os.getenv("CORS_ORIGIN", "*")
+_allow_origins = ["*"] if _cors_origin == "*" else [o.strip() for o in _cors_origin.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://stock-whisperer.vercel.app"],
-    allow_credentials=True,
+    allow_origins=_allow_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
