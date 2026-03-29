@@ -474,12 +474,12 @@ async def get_full_analysis(
         candles = []
 
     # Run all agents concurrently
-    ML_SERVICE = "http://localhost:8001"
+    ML_SERVICE = os.getenv("ML_SERVICE_URL", "http://localhost:8001")
 
     async def call_ml(endpoint, payload):
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.post(f"http://localhost:8001{endpoint}", json=payload)
+                r = await client.post(f"{ML_SERVICE}{endpoint}", json=payload)
                 if r.status_code != 200:
                     print(f"[ML ERROR] {endpoint} returned {r.status_code}: {r.text[:200]}")
                     return {}
@@ -602,7 +602,7 @@ async def chat(req: ChatRequest):
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(
-                "http://localhost:8001/api/gemini-chat",
+                f"{os.getenv('ML_SERVICE_URL', 'http://localhost:8001')}/api/gemini-chat",
                 json={
                     "ticker": req.ticker,
                     "language": req.language,
