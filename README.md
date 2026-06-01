@@ -23,10 +23,7 @@ India has 14 crore+ demat accounts but most retail investors rely on tips and gu
 
 ## Live Demo
 
-| Service | URL |
-|---------|-----|
-| Frontend | _Deploy URL here_ |
-| Backend API | _Render URL here_ |
+https://stock-whisperer-seven.vercel.app/
 
 ---
 
